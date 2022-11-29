@@ -1,0 +1,106 @@
+name: Testing
+run-name: "${{ github.workflow }} run #${{ github.run_number }} triggered by: ${{ github.triggering_actor }}"
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  Build-App:
+    uses: ./.github/workflows/build.yml
+
+  Dependency-Check:
+    runs-on: ubuntu-latest
+    container: python:slim
+    needs: Build-App
+    defaults:
+      run:
+        working-directory: backend
+        shell: bash
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v3.0.0
+        with:
+          name: api-app
+          path: backend
+      - name: Get permissions
+        run: chmod -R +x .
+      - name: Dependency check
+        run: |
+          source virtualenv/bin/activate
+          pip check
+
+  Code-Linting:
+    runs-on: ubuntu-latest
+    container: python:slim
+    needs: Build-App
+    defaults:
+      run:
+        working-directory: backend
+        shell: bash
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v3.0.0
+        with:
+          name: api-app
+          path: backend
+      - name: Grant permissions
+        run: chmod -R +x .
+      - name: Install Pylint
+        run: |
+          source virtualenv/bin/activate
+          pip install pylint
+      - name: Run Pylint check
+        run: |
+          source virtualenv/bin/activate      
+          pylint --fail-on=F,E --fail-under=0 --disable=E1101 --output-format=json:pylint-report.json ./*.py
+      - name: Upload Pylint report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v3.1.0
+        with:
+          name: pylint-report
+          path: ./backend/pylint-report.json
+
+  Functional-Testing:
+    runs-on: ubuntu-latest
+    container: python:slim
+    needs: Build-App
+    defaults:
+      run:
+        working-directory: backend
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3.1.0
+      - name: Download build
+        uses: actions/download-artifact@v3.0.0
+        with:
+          name: api-app
+          path: backend
+      - name: Grant permissions
+        run: chmod -R +x .
+      - name: Install Pytest
+        run: |
+          source virtualenv/bin/activate
+          pip install pytest
+      - name: Run Pytest check
+        run: |
+          source virtualenv/bin/activate
+          python -m pytest -v --junitxml=pytest-report.xml
+      - name: Publish Test Report
+        uses: mikepenz/action-junit-report@v3
+        if: ${{ always() }}
+        with:
+          report_paths: ./backend/pytest-report.xml
+          fail_on_failure: true
+          detailed_summary: true
+          include_passed: true
+          check_title_template: "File: {{FILE_NAME}} -> Suite: {{SUITE_NAME}} -> Test: {{TEST_NAME}}"
+          check_name: Pytest JUnitXML report
+      - name: Upload Pytest report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v3.1.0
+        with:
+          name: pytest-report
+          path: ./backend/pytest-report.xml

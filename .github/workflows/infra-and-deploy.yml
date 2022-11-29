@@ -1,0 +1,83 @@
+name: Infrastructure & Deployment
+run-name: "${{ github.workflow }} run #${{ github.run_number }} triggered by: ${{ github.triggering_actor }}"
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  Infrastructure-Update:
+    runs-on: ubuntu-latest
+    container: hashicorp/terraform:latest
+    defaults:
+      run:
+        working-directory: terraform
+    outputs:
+      DB_HOSTNAME: ${{ steps.output_hostname.outputs.DB_HOSTNAME }}
+      INSTANCE_URL: ${{ steps.output_instance_url.outputs.INSTANCE_URL }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.access_key }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.secret_key }}
+      TF_VAR_DB_USERNAME: ${{ secrets.username }}
+      TF_VAR_DB_PASSWORD: ${{ secrets.password }}
+      TF_VAR_DB_PORT: ${{ secrets.port }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3.1.0
+      - name: Initialise terraform
+        run: terraform init
+      - name: Update infrastructure
+        run: terraform apply --auto-approve
+      - name: Get DB hostname output
+        id: output_hostname
+        run: echo "DB_HOSTNAME=$(terraform output -raw rds_hostname)" >> $GITHUB_OUTPUT
+      - name: Get EC2 instance URL output
+        id: output_instance_url
+        run: echo "INSTANCE_URL=$(terraform output -raw instance_url)" >> $GITHUB_OUTPUT
+
+  Database-Initialisation:
+    runs-on: ubuntu-latest
+    container: mysql:latest
+    needs: Infrastructure-Update
+    env:
+      DB_USERNAME: ${{ secrets.username }}
+      DB_PASSWORD: ${{ secrets.password }}
+      DB_PORT: ${{ secrets.port }}
+      DB_HOSTNAME: ${{ needs.Infrastructure-Update.outputs.DB_HOSTNAME }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3.1.0
+      - name: Connect to RDS MySQL DB and execute file
+        run: mysql --local-infile=1 -h $DB_HOSTNAME -u $DB_USERNAME -p$DB_PASSWORD -P $DB_PORT < ./data/db-initialise.sql
+
+  Build-App:
+    uses: ./.github/workflows/build.yml
+  
+  Deployment:
+    runs-on: ubuntu-latest
+    needs: [Infrastructure-Update, Build-App]
+    defaults:
+      run:
+        shell: bash
+        working-directory: backend
+    env:
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      INSTANCE_URL: ${{ needs.Infrastructure-Update.outputs.INSTANCE_URL }}
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v3.0.0
+        with:
+          name: api-app
+          path: backend
+      - name: Install zip and zip up build
+        run: zip -r app ljps.py models.py requirements.txt reset-deployment.sh
+      - name: SCP files and SSH into instance to run app
+        run: |
+          command -v ssh-agent >/dev/null || ( apk --update add openssh-client )
+          eval $(ssh-agent -s)
+          echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+          mkdir -p ~/.ssh
+          ssh-keyscan $INSTANCE_URL >> ~/.ssh/known_hosts
+          scp ./app.zip ubuntu@$INSTANCE_URL:/home/ubuntu
+          ssh ubuntu@$INSTANCE_URL "unzip -o -qq app.zip && . ./reset-deployment.sh && echo "python3 ./ljps.py" | at now && exit"
